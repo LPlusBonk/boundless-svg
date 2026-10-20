@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  html, body {
+    height: 100%;
+    margin: 0;
+  }
+  body {
+    font-family: -apple-system, "Inter", sans-serif;
+    font-size: 12px;
+    padding: 12px;
+    color: #1a1a1a;
+    box-sizing: border-box;
+  }
+  h2 {
+    font-size: 13px;
+    margin: 0 0 10px;
+  }
+  .hint {
+    color: #777;
+    margin-bottom: 12px;
+  }
+  .item {
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    padding: 8px;
+    margin-bottom: 8px;
+  }
+  .name {
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .dims {
+    color: #777;
+    font-weight: 400;
+  }
+  pre.code {
+    margin: 0;
+    max-height: 220px;
+    overflow: auto;
+    background: #1e1e1e;
+    border-radius: 4px;
+    padding: 8px;
+    box-sizing: border-box;
+  }
+  pre.code code {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 10.5px;
+    line-height: 1.5;
+    white-space: pre;
+    color: #d4d4d4;
+  }
+  .p { color: #808080; }      /* punctuation: < > = */
+  .t { color: #569cd6; }      /* tag name */
+  .a-name { color: #9cdcfe; } /* attribute name */
+  .a-val { color: #ce9178; }  /* attribute value */
+
+  button {
+    margin-top: 6px;
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    border: 1px solid #ccc;
+    background: #f5f5f5;
+    cursor: pointer;
+  }
+  button:hover { background: #ececec; }
+  .err { color: #c0392b; }
+
+  #grip {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    width: 14px;
+    height: 14px;
+    cursor: nwse-resize;
+    background: linear-gradient(135deg, transparent 50%, #b3b3b3 50%);
+  }
+</style>
+</head>
+<body>
+  <h2>Boundless SVG</h2>
+  <div class="hint">Exports each selected node with viewBox/width/height locked to its own frame size. Updates automatically as you change selection.</div>
+  <div id="list"></div>
+  <div id="grip"></div>
+
+  <script>
+    const list = document.getElementById("list");
+
+    function downloadSvg(name, svg) {
+      const blob = new Blob([svg], { type: "image/svg+xml" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name.replace(/[^a-z0-9\-_]/gi, "_") + ".svg";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    // --- lightweight SVG/XML pretty-printer ---
+    function formatXml(xml) {
+      const PAD = "  ";
+      let indent = "";
+      let out = "";
+      xml
+        .replace(/>\s*</g, ">\n<")
+        .split("\n")
+        .forEach((line) => {
+          line = line.trim();
+          if (!line) return;
+          if (/^<\/\w/.test(line)) indent = indent.slice(PAD.length);
+          out += indent + line + "\n";
+          if (/^<[^!?/][^>]*[^/]>$/.test(line)) indent += PAD;
+        });
+      return out.trim();
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    // Highlights one "<...>" tag chunk: tag name + attribute name/value pairs
+    function highlightTag(tag) {
+      const closing = tag.startsWith("</");
+      const selfClose = tag.endsWith("/>");
+      const innerStart = closing ? 2 : 1;
+      const innerEnd = selfClose ? tag.length - 2 : tag.length - 1;
+      const inner = tag.slice(innerStart, innerEnd);
+
+      const nameMatch = inner.match(/^[a-zA-Z0-9:_-]+/);
+      const tagName = nameMatch ? nameMatch[0] : "";
+      const rest = inner.slice(tagName.length);
+
+      const attrRe = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*("[^"]*"|'[^']*')/g;
+      let attrsHtml = "";
+      let lastIndex = 0;
+      let m;
+      while ((m = attrRe.exec(rest))) {
+        attrsHtml += escapeHtml(rest.slice(lastIndex, m.index));
+        attrsHtml +=
+          '<span class="a-name">' + m[1] + '</span>=' +
+          '<span class="a-val">' + escapeHtml(m[2]) + "</span>";
+        lastIndex = attrRe.lastIndex;
+      }
+      attrsHtml += escapeHtml(rest.slice(lastIndex));
+
+      return (
+        '<span class="p">' + (closing ? "&lt;/" : "&lt;") + "</span>" +
+        '<span class="t">' + tagName + "</span>" +
+        attrsHtml +
+        '<span class="p">' + (selfClose ? "/&gt;" : "&gt;") + "</span>"
+      );
+    }
+
+    function highlightXml(xml) {
+      return xml.replace(/<[^>]+>/g, highlightTag);
+    }
+
+    onmessage = (event) => {
+      const msg = event.data.pluginMessage;
+      if (!msg) return;
+
+      if (msg.type === "error") {
+        list.innerHTML = '<div class="err">' + msg.message + "</div>";
+        return;
+      }
+
+      if (msg.type === "results") {
+        list.innerHTML = "";
+        msg.results.forEach((r) => {
+          const div = document.createElement("div");
+          div.className = "item";
+
+          if (r.error) {
+            div.innerHTML =
+              '<div class="name">' + r.name + '</div><div class="err">' + r.error + "</div>";
+          } else {
+            const pretty = formatXml(r.svg);
+            const highlighted = highlightXml(pretty);
+
+            div.innerHTML =
+              '<div class="name">' + r.name +
+              ' <span class="dims">(' + r.width + "\u00d7" + r.height + ')</span></div>' +
+              '<pre class="code"><code>' + highlighted + "</code></pre>" +
+              "<button>Download SVG</button>";
+            div.querySelector("button").addEventListener("click", () => downloadSvg(r.name, r.svg));
+          }
+
+          list.appendChild(div);
+        });
+      }
+    };
+
+    // --- resize grip ---
+    const grip = document.getElementById("grip");
+    let resizing = false;
+
+    grip.addEventListener("pointerdown", (e) => {
+      resizing = true;
+      grip.setPointerCapture(e.pointerId);
+    });
+    grip.addEventListener("pointermove", (e) => {
+      if (!resizing) return;
+      const width = Math.max(320, Math.floor(e.clientX + 8));
+      const height = Math.max(200, Math.floor(e.clientY + 8));
+      parent.postMessage({ pluginMessage: { type: "resize", width, height } }, "*");
+    });
+    grip.addEventListener("pointerup", (e) => {
+      resizing = false;
+      grip.releasePointerCapture(e.pointerId);
+    });
+  </script>
+</body>
+</html>
